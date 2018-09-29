@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,7 @@ import (
 // the button to enable log printer
 var logEnable bool
 var staticURL string
+var logURL string
 var expiration_time int
 var cache_size int
 var replacement_policy string
@@ -88,6 +90,12 @@ func removeFile(path string) {
 }
 
 func readFileByte(filePath string) []byte {
+	if PathExists(filePath) == false {
+		_, err := os.OpenFile(filePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+	}
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		log.Fatal(err)
@@ -131,7 +139,7 @@ Func: write the string content into assigned path by method of overwriting or ap
 */
 func writeFile(filePath string, content string, appendEnable bool) {
 	if appendEnable == false {
-		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, os.ModePerm)
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.ModePerm)
 		if err != nil {
 			log.Fatal(err)
 			return
@@ -288,6 +296,87 @@ func touch(url string) {
 }
 
 /*
+Name: touch
+@ para: url string
+@ Return: None
+Func: It seems like the "touch" command in linux, which changes the last update time of a file
+*/
+func download(url string, outpath string) error {
+	c := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}}
+	// request remote source and store it into disk
+	resp, err := c.Get(url)
+	if err != nil {
+		fmt.Println("LALA", err)
+		return err
+	}
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println(getTime(), ": StatusCode ", resp.StatusCode) // success
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 1024)
+	f, err1 := os.OpenFile(outpath, os.O_RDWR|os.O_CREATE, os.ModePerm) // make a new file
+	if err1 != nil {
+		// panic(err1)
+		fmt.Println(err)
+		log.Fatal(err)
+		return err
+	}
+	defer f.Close()
+
+	for {
+		n, _ := resp.Body.Read(buf)
+		if 0 == n {
+			break
+		}
+		f.WriteString(string(buf[:n]))
+	}
+	return nil
+}
+
+/*
+Name: readByte
+@ para: url string
+@ Return: []byte
+Func: judge the type of file first and read the content in format of []byte
+*/
+func readByte(url string) []byte {
+	var contentByte []byte
+	if fileType(url) == "jpg" ||
+		fileType(url) == "jpeg" ||
+		fileType(url) == "png" {
+		contentByte = readImageByte(url)
+	} else {
+		contentByte = readFileByte(url)
+	}
+	return contentByte
+}
+
+func addRecord(host string, outpath string, currenttime int) {
+	content := host + ";" + outpath + ";" + strconv.Itoa(currenttime) + "\n"
+	writeFile(logURL, content, true)
+}
+
+func addMemoryDick(host string, outpath string, currenttime int) bool {
+	if PathExists(outpath) == false {
+		return false
+	}
+
+	contentByte := readByte(outpath)
+
+	_, ok := domainDict[host]
+	if ok == false {
+		domainDict[host] = domainNode{make(map[string]Node)}
+	}
+
+	domainDict[host].urls[outpath] = Node{currenttime, contentByte}
+	return true
+}
+
+/*
 Name: getRemoteContent
 @ para: url string
 @ Return: string
@@ -313,58 +402,16 @@ func getRemoteContent(host string, url string) (string, error) {
 			println(getTime(), ": In webcache: True")
 		}
 	} else {
-		c := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			}}
-		// request remote source and store it into disk
-		resp, err := c.Get(url)
+		err := download(url, outpath)
 		if err != nil {
-			fmt.Println("LALA", err)
 			return "Wrong", err
 		}
-		if resp.StatusCode == http.StatusOK {
-			fmt.Println(getTime(), ": StatusCode ", resp.StatusCode) // success
-		}
-		defer resp.Body.Close()
+		currenttime := int(time.Now().Unix())
 
-		buf := make([]byte, 1024)
-		f, err1 := os.OpenFile(outpath, os.O_RDWR|os.O_CREATE, os.ModePerm) // make a new file
-		if err1 != nil {
-			// panic(err1)
-			fmt.Println(err)
-			log.Fatal(err)
-			return "Wrong", err
-		}
-		defer f.Close()
-
-		for {
-			n, _ := resp.Body.Read(buf)
-			if 0 == n {
-				break
-			}
-			f.WriteString(string(buf[:n]))
-		}
-
-		var contentByte []byte
-		if fileType(url) == "jpg" ||
-			fileType(url) == "jpeg" ||
-			fileType(url) == "png" {
-			contentByte = readImageByte(outpath)
-		} else {
-			contentByte = readFileByte(outpath)
-		}
-
-		_, ok := domainDict[host]
-		if ok == false {
-			domainDict[host] = domainNode{make(map[string]Node)}
-		}
-
-		domainDict[host].urls[outpath] = Node{int(time.Now().Unix()), contentByte}
-
-		println(getTime(), ": Insert", outpath, domainDict[host].urls[outpath].timestamp)
+		addRecord(host, outpath, currenttime)
 
 		if logEnable == true {
+			println(getTime(), ": Insert into memory dict", outpath, domainDict[host].urls[outpath].timestamp)
 			println(getTime(), ": In webcache: False")
 			println(getTime(), ": Download ", url, " into")
 			println(getTime(), ": ", outpath)
@@ -440,16 +487,6 @@ Func: the handler function of http.HandleFunc("/").
 	When receiving the http request, the goroutine cache starts
 */
 func cache(w http.ResponseWriter, r *http.Request) {
-	host := r.URL.Hostname()
-	host_port := r.URL.Host
-	path := r.URL.Path
-	if logEnable == true {
-		println("--------------------------------------------")
-		println("Hi, here comes a HTTP request whose method is", r.Method)
-		println("HOST_PORT:", host_port)
-		println("PATH:", path)
-		println()
-	}
 
 	// ignore all the methods except "GET"
 	if r.Method != "GET" {
@@ -457,53 +494,72 @@ func cache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	host := r.URL.Hostname()
+	host_port := r.URL.Host
+	path := r.URL.Path
 	httpurl := "http://" + host_port + path
 	localurl := "." + path
+	hashurl := staticURL + "/" + host + "/" + hashName(httpurl)
 
 	if logEnable == true {
-		println("httpurl:", httpurl)
-		println("localurl:", localurl)
+		println("--------------------------------------------")
+		println("Hi, here comes a HTTP request whose method is", r.Method)
+		println("HOST_PORT:", host_port)
+		println("PATH:", path)
+		// println("HTTPurl:", httpurl)
+		// println("Localurl:", localurl)
+		// println("Hashurl:", hashurl)
+		println()
 	}
 
+	// check in data structure
 	_, ok_1 := domainDict[host]
 	if ok_1 == true {
 		_, ok_2 := domainDict[host].urls[localurl]
 		if ok_2 == true {
+			println(getTime(), ": GET ", localurl)
+			fmt.Printf("%c[1;0;32m%s%c[0m\n", 0x1B, getTime()+" : Read from webcache memory: True, ok_2", 0x1B)
 
-			println(getTime(), ": read from memory dict")
-
-			if fileType(path) == "css" {
+			if fileType(localurl) == "css" {
 				w.Header().Set("Content-Type", "text/css")
 			}
 
 			w.Write(domainDict[host].urls[localurl].body)
+
+			if logEnable == true {
+				println("\nAll work has been done")
+				println("--------------------------------------------\n")
+			}
+			return
+		}
+		_, ok_3 := domainDict[host].urls[hashurl]
+		if ok_3 == true {
+			println(getTime(), ": GET ", hashurl)
+			print(getTime())
+			fmt.Printf("%c[1;0;32m%s%c[0m\n", 0x1B, getTime()+" : Read from webcache memory: True, ok_3", 0x1B)
+
+			if fileType(hashurl) == "css" {
+				w.Header().Set("Content-Type", "text/css")
+			}
+
+			w.Write(domainDict[host].urls[hashurl].body)
+
+			if logEnable == true {
+				println("\nAll work has been done")
+				println("--------------------------------------------\n")
+			}
+			return
 		}
 	}
 
-	if strings.Contains(r.URL.Path, "jpg") == true ||
-		strings.Contains(r.URL.Path, "jpeg") == true ||
-		strings.Contains(r.URL.Path, "png") == true {
-
-		if PathExists(localurl) == true {
-			touch(localurl)
-			if logEnable == true {
-				println(getTime(), ": GET ", localurl)
-				println(getTime(), ": In webcache: True")
-			}
-			w.Write(readImageByte(localurl))
-		} else {
-			println(getTime(), ": Try Remote ")
-			imageURL, err := getRemoteContent(host, httpurl)
-			if err != nil {
-				println(getTime(), ": Can't load the image")
-				return
-			}
-			w.Write(readImageByte(imageURL))
-		}
-
-	} else if fileType(path) == "css" ||
+	// then check disk
+	if fileType(path) == "jpg" ||
+		fileType(path) == "jpeg" ||
+		fileType(path) == "png" ||
+		fileType(path) == "css" ||
 		fileType(path) == "js" {
 
+		// if the type is css, must set the header first
 		if fileType(path) == "css" {
 			w.Header().Set("Content-Type", "text/css")
 		}
@@ -512,30 +568,29 @@ func cache(w http.ResponseWriter, r *http.Request) {
 			touch(localurl)
 			if logEnable == true {
 				println(getTime(), ": GET ", localurl)
-				println(getTime(), ": In webcache: True")
+				println(getTime(), ": In webcache disk: True")
 			}
-			w.Write(readFileByte(localurl))
+			w.Write(readByte(localurl))
 		} else {
-			println(getTime(), ": Try Remote ")
+			println(getTime(), ": try to requst remote server by http ")
 			imageURL, err := getRemoteContent(host, httpurl)
 			if err != nil {
-				println(getTime(), ": Can't load the image")
+				println(getTime(), ": Can't load the content")
 				return
 			}
-			w.Write(readFileByte(imageURL))
+			w.Write(readByte(imageURL))
 		}
 
 	} else {
 		if logEnable == true {
 			println(getTime(), ": GET ", httpurl)
 		}
-
 		data := getHTML(host, httpurl)
 		fmt.Fprintf(w, data)
 	}
 
 	if logEnable == true {
-		println("All work has been done")
+		println("\nAll work has been done")
 		println("--------------------------------------------\n")
 	}
 }
@@ -597,33 +652,8 @@ func persistenceCheck(interval int) {
 	}
 }
 
-/*
-Name: Init
-@ para: None
-@ Return: None
-Func: Initialization of the program in the first step
-*/
-func Init() {
-	staticURL = "./static"
-	expiration_time = 60
-	cache_size = 6000
-	replacement_policy = "LRU"
-
-	domainDict = make(map[string]domainNode)
-
-	if logEnable == true {
-		println(getTime(), ": Initializing...")
-	}
-	if PathExists(staticURL) == false {
-		makedir(staticURL)
-	}
-	if logEnable == true {
-		println(getTime(), ": Initializing Done.")
-	}
-}
-
-func displayDict() {
-	timer := time.NewTicker(time.Duration(10) * time.Second)
+func displayDict(intercal int64) {
+	timer := time.NewTicker(time.Duration(intercal) * time.Second)
 	for {
 		select {
 		case <-timer.C:
@@ -641,15 +671,71 @@ func displayDict() {
 	}
 }
 
+func loadLog(logURL string) {
+	lines := strings.Split(readFile(logURL), "\n")
+	count := 0
+	if logEnable == true {
+		println(getTime(), ": restart webcache and load memory.\n")
+	}
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.Split(lines[i], ";")
+		if len(line) != 3 {
+			continue
+		}
+		ctime, _ := strconv.Atoi(line[2])
+		readstatus := addMemoryDick(line[0], line[1], ctime)
+		if readstatus == false {
+			continue
+		}
+		count++
+		fmt.Printf("%d. host:%s, url: %s\n", count, line[0], line[1])
+	}
+
+	if logEnable == true {
+		println()
+		println(getTime(), ": loading webcache done.")
+	}
+}
+
+/*
+Name: Init
+@ para: None
+@ Return: None
+Func: Initialization of the program in the first step
+*/
+func Init() {
+
+	if logEnable == true {
+		println(getTime(), ": Initializing...")
+	}
+
+	staticURL = "./static"
+	expiration_time = 60
+	cache_size = 6000
+	replacement_policy = "LRU"
+	logURL = "./indexLog.txt"
+	logEnable = true
+
+	domainDict = make(map[string]domainNode)
+	loadLog(logURL)
+
+	if PathExists(staticURL) == false {
+		makedir(staticURL)
+	}
+
+	if logEnable == true {
+		println(getTime(), ": Initializing Done.\n")
+	}
+}
+
 func main() {
 	println(getTime(), ": WebCache starts monitoring port 8080")
 
-	go displayDict()
+	go displayDict(30)
 
 	// Timer to clean the expired files
 	// go persistenceCheck(10)
-
-	logEnable = true
 
 	Init()
 	http.HandleFunc("/", cache)
